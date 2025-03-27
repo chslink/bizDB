@@ -16,15 +16,14 @@ var (
 
 type Record struct {
 	value   any
-	version int64 // 每个键的版本号
+	version int64
 }
 
-// Index 索引定义
 type Index struct {
-	Name   string   // 索引名
-	Fields []string // 索引字段
-	Unique bool     // 是否唯一
-	Type   string   // 索引类型(btree/hash)
+	Name   string
+	Fields []string
+	Unique bool
+	Type   string
 }
 
 type IModel interface {
@@ -39,23 +38,23 @@ type Copyable[T any] interface {
 type Table struct {
 	mu      sync.RWMutex
 	data    map[interface{}]*Record
-	version int64 // 表的版本号，用于快速检测变更
+	version int64
 }
 
 type Transaction struct {
 	id           int64
 	memDB        *MemoryDB
-	readCache    map[string]map[interface{}]interface{} // 新增读取缓存
-	keySnapshots map[string]map[interface{}]int64       // 记录访问键的版本号
+	readCache    map[string]map[interface{}]interface{}
+	keySnapshots map[string]map[interface{}]int64
 	updates      map[string]map[interface{}]any
 	deletes      map[string]map[interface{}]struct{}
 	committed    bool
 }
 
 type MemoryDB struct {
-	tables    sync.Map // 表名 -> *Table
+	tables    sync.Map
 	txCounter int64
-	activeTx  sync.Map // 新增：跟踪活动事务
+	activeTx  sync.Map
 }
 
 func NewMemoryDB() *MemoryDB {
@@ -71,7 +70,7 @@ func (db *MemoryDB) Begin() *Transaction {
 	tx := &Transaction{
 		id:           txID,
 		memDB:        db,
-		readCache:    map[string]map[interface{}]interface{}{},
+		readCache:    make(map[string]map[interface{}]interface{}),
 		keySnapshots: make(map[string]map[interface{}]int64),
 		updates:      make(map[string]map[interface{}]any),
 		deletes:      make(map[string]map[interface{}]struct{}),
@@ -95,7 +94,7 @@ func (db *MemoryDB) Get(tx *Transaction, table string, key interface{}) (interfa
 		}
 		return record.value, nil
 	}
-	// 新增有效性检查
+
 	if _, ok := db.activeTx.Load(tx.id); !ok {
 		return nil, ErrTransactionNotFound
 	}
@@ -103,19 +102,20 @@ func (db *MemoryDB) Get(tx *Transaction, table string, key interface{}) (interfa
 	if tx.committed {
 		return nil, errors.New("transaction already committed")
 	}
-	// 1. 先检查读取缓存
-	if tableCache := tx.readCache[table]; tableCache != nil {
+
+	if tableCache, ok := tx.readCache[table]; ok {
 		if val, exists := tableCache[key]; exists {
 			return val, nil
 		}
 	}
-	if deletes, ok := tx.deletes[table]; ok && deletes != nil {
+
+	if deletes, ok := tx.deletes[table]; ok {
 		if _, deleted := deletes[key]; deleted {
 			return nil, ErrKeyNotFound
 		}
 	}
 
-	if updates, ok := tx.updates[table]; ok && updates != nil {
+	if updates, ok := tx.updates[table]; ok {
 		if val, updated := updates[key]; updated {
 			return val, nil
 		}
@@ -138,7 +138,7 @@ func (db *MemoryDB) Get(tx *Transaction, table string, key interface{}) (interfa
 		tx.keySnapshots[table] = make(map[interface{}]int64)
 	}
 	tx.keySnapshots[table][key] = record.version
-	// . 记录到读取缓存
+
 	if tx.readCache[table] == nil {
 		tx.readCache[table] = make(map[interface{}]interface{})
 	}
@@ -150,7 +150,7 @@ func (db *MemoryDB) Put(tx *Transaction, table string, key interface{}, value an
 	if tx == nil {
 		return errors.New("write operation requires a transaction")
 	}
-	// 新增有效性检查
+
 	if _, ok := db.activeTx.Load(tx.id); !ok {
 		return ErrTransactionNotFound
 	}
@@ -175,7 +175,7 @@ func (db *MemoryDB) Delete(tx *Transaction, table string, key interface{}) error
 	if tx == nil {
 		return errors.New("delete operation requires a transaction")
 	}
-	// 新增有效性检查
+
 	if _, ok := db.activeTx.Load(tx.id); !ok {
 		return ErrTransactionNotFound
 	}
@@ -200,7 +200,7 @@ func (db *MemoryDB) Range(tx *Transaction, tableName string, f func(id, val any)
 	if tx == nil {
 		tbl, ok := db.tables.Load(tableName)
 		if !ok {
-			return ErrKeyNotFound
+			return ErrTableNotFound
 		}
 		tableObj := tbl.(*Table)
 		tableObj.mu.RLock()
@@ -208,56 +208,65 @@ func (db *MemoryDB) Range(tx *Transaction, tableName string, f func(id, val any)
 
 		for k, v := range tableObj.data {
 			if !f(k, v.value) {
-				break
+				return nil
 			}
 		}
 		return nil
 	}
+
 	if tx.committed {
 		return errors.New("transaction already committed")
 	}
 
-	tbl, ok := db.tables.Load(tableName)
-	if ok {
-		tableObj := tbl.(*Table)
-		tableObj.mu.RLock()
-		for k, v := range tableObj.data {
-			if deletes, ok := tx.deletes[tableName]; ok && deletes != nil {
-				if _, deleted := deletes[k]; deleted {
-					continue
-				}
-			}
-			if !f(k, v.value) {
-				break
-			}
-		}
-		tableObj.mu.RUnlock()
-	}
-
+	// 处理事务中的更新
 	if updates, ok := tx.updates[tableName]; ok {
-
 		for k, v := range updates {
-			if deletes, ok := tx.deletes[tableName]; ok && deletes != nil {
+			if deletes, ok := tx.deletes[tableName]; ok {
 				if _, deleted := deletes[k]; deleted {
 					continue
 				}
 			}
 			if !f(k, v) {
-				break
+				return nil
 			}
 		}
 	}
+
+	// 处理基础表中的数据，排除被删除或已更新的
+	tbl, ok := db.tables.Load(tableName)
+	if !ok {
+		return nil
+	}
+	tableObj := tbl.(*Table)
+	tableObj.mu.RLock()
+	defer tableObj.mu.RUnlock()
+
+	for k, record := range tableObj.data {
+		if deletes, ok := tx.deletes[tableName]; ok {
+			if _, deleted := deletes[k]; deleted {
+				continue
+			}
+		}
+		if updates, ok := tx.updates[tableName]; ok {
+			if _, updated := updates[k]; updated {
+				continue
+			}
+		}
+		if !f(k, record.value) {
+			return nil
+		}
+	}
+
 	return nil
 }
 
 func (tx *Transaction) Commit() error {
-	defer tx.memDB.activeTx.Delete(tx.id) // 确保删除
+	defer tx.memDB.activeTx.Delete(tx.id)
 
 	if tx.committed {
 		return errors.New("transaction already committed")
 	}
 
-	// 收集所有涉及的表
 	tables := make(map[string]struct{})
 	for table := range tx.keySnapshots {
 		tables[table] = struct{}{}
@@ -269,7 +278,7 @@ func (tx *Transaction) Commit() error {
 		tables[table] = struct{}{}
 	}
 
-	var tableNames []string
+	tableNames := make([]string, 0, len(tables))
 	for table := range tables {
 		tableNames = append(tableNames, table)
 	}
@@ -312,7 +321,6 @@ func (tx *Transaction) Commit() error {
 			if record, exists := tableObj.data[key]; exists {
 				record.value = value
 				record.version++
-				//removeIndexes(tableObj, record, key)
 			} else {
 				tableObj.data[key] = &Record{
 					value:   value,
@@ -346,6 +354,6 @@ func (tx *Transaction) Rollback() error {
 		return errors.New("transaction already committed")
 	}
 	tx.committed = true
-	tx.memDB.activeTx.Delete(tx.id) // 新增
+	tx.memDB.activeTx.Delete(tx.id)
 	return nil
 }
