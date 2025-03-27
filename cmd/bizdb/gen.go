@@ -17,6 +17,7 @@ var (
 	tables        string
 	excludeTables string
 	config        string
+	importPath    string
 )
 
 func init() {
@@ -31,6 +32,8 @@ func init() {
 	genCmd.PersistentFlags().StringVar(&repoPkg, "repo_package", "repos", "repositories output pkg")
 	genCmd.PersistentFlags().StringVar(&tables, "tables", "*", "tables to generate (biz*  biz[1-2]  biz??? )")
 	genCmd.PersistentFlags().StringVar(&excludeTables, "exclude_tables", "", "exclude tables to generate")
+	genCmd.PersistentFlags().StringVarP(&importPath, "model_import_path", "i", "./models", "use for generate repo codes,import your models import path,")
+
 }
 
 var genCmd = &cobra.Command{
@@ -53,6 +56,7 @@ var genCmd = &cobra.Command{
 			conf.RepoPackage = viper.GetString("repo_package")
 			conf.Tables = viper.GetString("tables")
 			conf.ExcludeTables = viper.GetString("exclude_tables")
+			conf.ModelImportPath = viper.GetString("model_import_path")
 			cobra.CheckErr(gen.Run(conf))
 			return
 		} else {
@@ -61,14 +65,15 @@ var genCmd = &cobra.Command{
 				return
 			}
 			err := gen.Run(&gen.Config{
-				Dsn:           dsn,
-				ModelDir:      modelsDir,
-				ModelPackage:  modelsPkg,
-				OnlyModel:     onlyModel,
-				RepoDir:       repoDir,
-				RepoPackage:   repoPkg,
-				Tables:        tables,
-				ExcludeTables: excludeTables,
+				Dsn:             dsn,
+				ModelDir:        modelsDir,
+				ModelPackage:    modelsPkg,
+				OnlyModel:       onlyModel,
+				RepoDir:         repoDir,
+				RepoPackage:     repoPkg,
+				Tables:          tables,
+				ExcludeTables:   excludeTables,
+				ModelImportPath: importPath,
 			})
 			cobra.CheckErr(err)
 		}
