@@ -20,24 +20,32 @@ type Record struct {
 	version int64 // 每个键的版本号
 }
 
+// Index 索引定义
+type Index struct {
+	Name   string   // 索引名
+	Fields []string // 索引字段
+	Unique bool     // 是否唯一
+	Type   string   // 索引类型(btree/hash)
+}
+
 type IModel interface {
 	TableName() string
-	Indexes() []string
+	Indexes() []Index
 }
 
 type Copyable[T any] interface {
 	Copy() T
 }
 
-type Index struct {
+type TableIndex struct {
 	entries map[interface{}]map[interface{}]struct{} // 索引值 -> 主键集合
 }
 
 type Table struct {
 	mu      sync.RWMutex
 	data    map[interface{}]*Record
-	indexes map[string]*Index // 索引名到索引的映射
-	version int64             // 表的版本号，用于快速检测变更
+	indexes map[string]*TableIndex // 索引名到索引的映射
+	version int64                  // 表的版本号，用于快速检测变更
 }
 
 type Transaction struct {
@@ -229,6 +237,60 @@ func (db *MemoryDB) Scan(tx *Transaction, table string) (map[interface{}]interfa
 	return result, nil
 }
 
+func (db *MemoryDB) Range(tx *Transaction, tableName string, f func(id, val any) bool) error {
+	if tx == nil {
+		tbl, ok := db.tables.Load(tableName)
+		if !ok {
+			return ErrKeyNotFound
+		}
+		tableObj := tbl.(*Table)
+		tableObj.mu.RLock()
+		defer tableObj.mu.RUnlock()
+
+		for k, v := range tableObj.data {
+			if !f(k, v.value) {
+				break
+			}
+		}
+		return nil
+	}
+	if tx.committed {
+		return errors.New("transaction already committed")
+	}
+
+	tbl, ok := db.tables.Load(tableName)
+	if ok {
+		tableObj := tbl.(*Table)
+		tableObj.mu.RLock()
+		for k, v := range tableObj.data {
+			if deletes, ok := tx.deletes[tableName]; ok && deletes != nil {
+				if _, deleted := deletes[k]; deleted {
+					continue
+				}
+			}
+			if !f(k, v.value) {
+				break
+			}
+		}
+		tableObj.mu.RUnlock()
+	}
+
+	if updates, ok := tx.updates[tableName]; ok {
+
+		for k, v := range updates {
+			if deletes, ok := tx.deletes[tableName]; ok && deletes != nil {
+				if _, deleted := deletes[k]; deleted {
+					continue
+				}
+			}
+			if !f(k, v) {
+				break
+			}
+		}
+	}
+	return nil
+}
+
 func (tx *Transaction) Commit() error {
 	if tx.committed {
 		return errors.New("transaction already committed")
@@ -326,35 +388,35 @@ func (tx *Transaction) Rollback() error {
 	return nil
 }
 
-func addIndexes(table *Table, model any, pk interface{}) {
-	m := model.(IModel)
-	for _, indexName := range m.Indexes() {
-		indexVal, _ := getFieldValue(m, indexName)
-		if _, ok := table.indexes[indexName]; !ok {
-			table.indexes[indexName] = &Index{entries: make(map[interface{}]map[interface{}]struct{})}
-		}
-		index := table.indexes[indexName]
-		if _, ok := index.entries[indexVal]; !ok {
-			index.entries[indexVal] = make(map[interface{}]struct{})
-		}
-		index.entries[indexVal][pk] = struct{}{}
-	}
-}
-
-func removeIndexes(table *Table, model any, pk interface{}) {
-	m := model.(IModel)
-	for _, indexName := range m.Indexes() {
-		indexVal, _ := getFieldValue(m, indexName)
-		if index, ok := table.indexes[indexName]; ok {
-			if keys, ok := index.entries[indexVal]; ok {
-				delete(keys, pk)
-				if len(keys) == 0 {
-					delete(index.entries, indexVal)
-				}
-			}
-		}
-	}
-}
+//func addIndexes(table *Table, model any, pk interface{}) {
+//	m := model.(IModel)
+//	for _, indexName := range m.Indexes() {
+//		indexVal, _ := getFieldValue(m, indexName)
+//		if _, ok := table.indexes[indexName]; !ok {
+//			table.indexes[indexName] = &TableIndex{entries: make(map[interface{}]map[interface{}]struct{})}
+//		}
+//		index := table.indexes[indexName]
+//		if _, ok := index.entries[indexVal]; !ok {
+//			index.entries[indexVal] = make(map[interface{}]struct{})
+//		}
+//		index.entries[indexVal][pk] = struct{}{}
+//	}
+//}
+//
+//func removeIndexes(table *Table, model any, pk interface{}) {
+//	m := model.(IModel)
+//	for _, indexName := range m.Indexes() {
+//		indexVal, _ := getFieldValue(m, indexName)
+//		if index, ok := table.indexes[indexName]; ok {
+//			if keys, ok := index.entries[indexVal]; ok {
+//				delete(keys, pk)
+//				if len(keys) == 0 {
+//					delete(index.entries, indexVal)
+//				}
+//			}
+//		}
+//	}
+//}
 
 func getFieldValue(model any, fieldName string) (interface{}, error) {
 	v := reflect.ValueOf(model)
