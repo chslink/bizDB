@@ -102,11 +102,6 @@ func (r *{{.StructName}}Repo) Update(model *models.{{.StructName}}) error {
 	if r.tx == nil {
 		return errors.New("write operation requires a transaction")
 	}
-
-	if existing, _ := r.memDB.Get(r.tx, r.tableName, model.{{.PrimaryKey.Name}}); existing == nil {
-		return Err{{.StructName}}NotFound
-	}
-
 	return r.memDB.Put(r.tx, r.tableName, model.{{.PrimaryKey.Name}}, model.Copy())
 }
 
@@ -115,11 +110,6 @@ func (r *{{.StructName}}Repo) Delete({{.PrimaryKey.Name}} {{.PrimaryKey.GoType}}
 	if r.tx == nil {
 		return errors.New("delete operation requires a transaction")
 	}
-
-	if existing, _ := r.memDB.Get(r.tx, r.tableName, {{.PrimaryKey.Name}}); existing == nil {
-		return Err{{.StructName}}NotFound
-	}
-
 	return r.memDB.Delete(r.tx, r.tableName, {{.PrimaryKey.Name}})
 }
 
