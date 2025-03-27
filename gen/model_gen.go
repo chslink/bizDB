@@ -1,4 +1,4 @@
-package bizdb
+package gen
 
 import (
 	"bytes"
@@ -16,6 +16,7 @@ type Field struct {
 	Primary bool   `yaml:"primary"`
 	Size    int    `yaml:"size"`
 	Unique  bool   `yaml:"unique"`
+	Comment string `yaml:"comment"`
 }
 
 type Model struct {

@@ -1,4 +1,4 @@
-package bizdb
+package gen
 
 import (
 	"testing"
@@ -31,7 +31,7 @@ func TestTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = GenerateCode(model, "./models")
+	err = GenerateCode(model, "./test/models")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,14 +1,15 @@
-package bizdb
+package gen
 
 const memoryRepoTemplate = `
 package repos
 
 import (
 	"testCode/test/models"
-	"testCode/test"
 
 	"errors"
 	"fmt"
+
+	"github.com/chslink/bizdb"
 )
 
 var (
@@ -16,13 +17,13 @@ var (
 )
 
 type {{.Name}}Repo struct {
-	memDB     *test.MemoryDB
+	memDB     *bizdb.MemoryDB
 	tableName string
-	tx        *test.Transaction // 事务对象
+	tx        *bizdb.Transaction // 事务对象
 }
 
 // New{{.Name}}Repo 创建普通Repository(无事务)
-func New{{.Name}}Repo(memDB *test.MemoryDB) *{{.Name}}Repo {
+func New{{.Name}}Repo(memDB *bizdb.MemoryDB) *{{.Name}}Repo {
 	return &{{.Name}}Repo{
 		memDB:     memDB,
 		tableName: "{{.Table}}",
@@ -30,7 +31,7 @@ func New{{.Name}}Repo(memDB *test.MemoryDB) *{{.Name}}Repo {
 }
 
 // WithTx 创建带事务的Repository
-func (r *{{.Name}}Repo) WithTx(tx *test.Transaction) *{{.Name}}Repo {
+func (r *{{.Name}}Repo) WithTx(tx *bizdb.Transaction) *{{.Name}}Repo {
 	return &{{.Name}}Repo{
 		memDB:     r.memDB,
 		tableName: r.tableName,
