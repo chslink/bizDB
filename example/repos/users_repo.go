@@ -104,11 +104,6 @@ func (r *UsersRepo) Update(model *models.Users) error {
 	if r.tx == nil {
 		return errors.New("write operation requires a transaction")
 	}
-
-	if existing, _ := r.memDB.Get(r.tx, r.tableName, model.Id); existing == nil {
-		return ErrUsersNotFound
-	}
-
 	return r.memDB.Put(r.tx, r.tableName, model.Id, model.Copy())
 }
 
@@ -117,11 +112,6 @@ func (r *UsersRepo) Delete(Id int64) error {
 	if r.tx == nil {
 		return errors.New("delete operation requires a transaction")
 	}
-
-	if existing, _ := r.memDB.Get(r.tx, r.tableName, Id); existing == nil {
-		return ErrUsersNotFound
-	}
-
 	return r.memDB.Delete(r.tx, r.tableName, Id)
 }
 
