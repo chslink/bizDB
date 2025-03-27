@@ -59,6 +59,21 @@ func Run(conf *Config) error {
 			log.Printf("写入model代码失败: %v", err)
 			continue
 		}
+		if conf.OnlyModel {
+			// 跳过repo生成
+			continue
+		}
+		modelInfo := getModelInfo(conf, table, columns, indexes)
+		code, err = generateRepoCode(modelInfo)
+		if err != nil {
+			log.Printf("生成repo代码失败: %v", err)
+			continue
+		}
+		repoFilename := filepath.Join(conf.RepoDir, strings.ToLower(table)+"_repo.go")
+		if err := os.WriteFile(repoFilename, []byte(code), 0644); err != nil {
+			log.Printf("写入repo代码失败: %v", err)
+			continue
+		}
 	}
 
 	return nil

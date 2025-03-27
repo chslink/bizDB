@@ -1,201 +1,403 @@
 package gen
 
 import (
-	"bytes"
+	"database/sql"
+	_ "embed"
 	"fmt"
-	"go/format"
-	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 )
 
-type Field struct {
-	Name    string `yaml:"name"`
-	Type    string `yaml:"type"`
-	Primary bool   `yaml:"primary"`
-	Size    int    `yaml:"size"`
-	Unique  bool   `yaml:"unique"`
-	Comment string `yaml:"comment"`
+// IndexInfo 新增索引信息结构体
+type IndexInfo struct {
+	IndexName    string
+	ColumnNames  []string
+	IsUnique     bool
+	IsPrimary    bool
+	IndexType    string
+	IndexComment string
 }
 
-type Model struct {
-	Name   string  `yaml:"name"`
-	Table  string  `yaml:"table"`
-	Fields []Field `yaml:"fields"`
+type Column struct {
+	Name       string
+	Type       string
+	Nullable   string
+	Comment    string
+	ColumnType string       // 包含更多类型信息（如有符号/无符号）
+	Indexes    []*IndexInfo // 新增索引关联
 }
 
-const modelTemplate = `
-package models
-
-import (
-	"time"
-	{{if hasSpecialTypes .Fields}}
-	"encoding/json"
-	{{end}}
-)
-
-type {{.Name}} struct {
-	{{range .Fields}}
-	{{.Name}} {{.Type}}  {{end}}
+type ModelTemplateData struct {
+	PackageName string
+	StructName  string
+	TableName   string
+	Imports     map[string]bool
+	Columns     []FieldData
+	Indexes     []IndexInfo // 新增顶层索引信息
 }
 
-func ({{.Name}}) TableName() string {
-	return "{{.Table}}"
+type FieldData struct {
+	Name      string
+	Type      string
+	Tag       string
+	Comment   string
+	IndexTags string // 新增索引标签
 }
 
-// Copy 创建结构体的深拷贝
-func (m *{{.Name}}) Copy() *{{.Name}} {
-	if m == nil {
-		return nil
-	}
-	
-	cpy := &{{.Name}}{
-		{{range .Fields}}
-		{{.Name}}: {{if isPrimitive .Type}}m.{{.Name}}{{else if eq .Type "time.Time"}}m.{{.Name}}{{else}}deepCopy{{.Name}}(m.{{.Name}}){{end}},{{end}}
-	}
-	
-	return cpy
+//go:embed model.tpl
+var modelTpl string
+var modelTemplate = template.Must(template.New("model").Funcs(funcMap).Parse(modelTpl))
+
+// 添加自定义模板函数
+var funcMap = template.FuncMap{
+	"join":          strings.Join,
+	"indexType":     getIndexTypeDescription,
+	"toCamel":       toCamelCase,
+	"upper":         strings.ToUpper,
+	"toLower":       strings.ToLower,
+	"isPointerType": isPointerType,
+	"toRepoName":    func(s string) string { return strings.ToUpper(s[:1]) + s[1:] + "Repo" },
+	"isLast":        func(index int, total int) bool { return index == total-1 },
+	"add":           func(a, b int) int { return a + b },
+	"isLastField":   func(idx, total int) bool { return idx == total-1 },
+	"isLastIndex":   func(idx, total int) bool { return idx == total-1 },
+	"toGoComments":  func(s string) string { return "// " + strings.ReplaceAll(s, "\n", "\n// ") },
 }
 
-{{range .Fields}}
-{{if not (isPrimitive .Type)}}
-func deepCopy{{.Name}}(src {{.Type}}) {{.Type}} {
-	// 处理特殊类型的深拷贝逻辑
-	{{if isSlice .Type}}
-	if src == nil {
-		return nil
-	}
-	dst := make({{.Type}}, len(src))
-	copy(dst, src)
-	return dst
-	{{else if isMap .Type}}
-	if src == nil {
-		return nil
-	}
-	dst := make({{.Type}})
-	for k, v := range src {
-		dst[k] = v // 如果值也需要深拷贝，这里需要递归处理
-	}
-	return dst
-	{{else if isPointer .Type}}
-	if src == nil {
-		return nil
-	}
-	// 这里需要根据具体类型处理
-	{{else}}
-	// 默认使用JSON序列化/反序列化作为通用深拷贝方案
-	var dst {{.Type}}
-	bytes, _ := json.Marshal(src)
-	_ = json.Unmarshal(bytes, &dst)
-	return dst
-	{{end}}
-}
-{{end}}
-{{end}}
-`
+func generateModelCode(pkgName, tableName string, columns []Column, indexes []IndexInfo) (string, error) {
+	imports := make(map[string]bool)
+	var fields []FieldData
 
-func isPrimitive(typ string) bool {
-	switch typ {
-	case "string", "int", "int8", "int16", "int32", "int64",
-		"uint", "uint8", "uint16", "uint32", "uint64",
-		"float32", "float64", "bool":
-		return true
+	structName := toCamelCase(tableName)
+
+	// 创建字段到索引的映射
+	indexMap := make(map[string][]string)
+	for _, idx := range indexes {
+		for _, col := range idx.ColumnNames {
+			indexMap[col] = append(indexMap[col], formatIndexTag(idx))
+		}
+	}
+
+	for _, col := range columns {
+		goType := mysqlToGoType(col)
+		fieldName := toCamelCase(col.Name)
+		// 处理索引标签
+		var indexTags []string
+		if tags, exists := indexMap[col.Name]; exists {
+			indexTags = append(indexTags, tags...)
+		}
+		indexTagStr := strings.Join(indexTags, " ")
+		// 处理需要导入的包
+		switch goType {
+		case "time.Time", "*time.Time":
+			imports["time"] = true
+		case "sql.NullString", "sql.NullInt32", "sql.NullInt64", "sql.NullFloat64", "sql.NullBool", "sql.NullTime":
+			imports["database/sql"] = true
+		}
+
+		// 生成结构体标签
+		tags := fmt.Sprintf("`db:\"%s\" json:\"%s\"`",
+			col.Name,
+			col.Name,
+		)
+
+		// 处理注释
+		comment := ""
+		if col.Comment != "" {
+			comment = fmt.Sprintf("// %s", col.Comment)
+		}
+
+		fields = append(fields, FieldData{
+			Name:      fieldName,
+			Type:      goType,
+			Tag:       tags,
+			Comment:   comment,
+			IndexTags: indexTagStr, // 添加索引标签
+		})
+	}
+	// 更新模板数据
+	tmplData := ModelTemplateData{
+		PackageName: pkgName,
+		StructName:  structName,
+		TableName:   tableName,
+		Imports:     imports,
+		Columns:     fields,
+		Indexes:     indexes,
+	}
+
+	var buf strings.Builder
+	err := modelTemplate.Execute(&buf, tmplData)
+	if err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
+}
+
+// 新增获取所有表的方法
+func getAllTables(db *sql.DB, dbName string) ([]string, error) {
+	query := `
+		SELECT TABLE_NAME 
+		FROM information_schema.TABLES 
+		WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+	`
+
+	rows, err := db.Query(query, dbName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return nil, err
+		}
+		tables = append(tables, table)
+	}
+
+	return tables, nil
+}
+
+func getColumns(db *sql.DB, dbName, tableName string) ([]Column, error) {
+	query := `
+		SELECT 
+			COLUMN_NAME,
+			DATA_TYPE,
+			COLUMN_TYPE,
+			IS_NULLABLE,
+			COLUMN_COMMENT
+		FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+		ORDER BY ORDINAL_POSITION
+	`
+
+	rows, err := db.Query(query, dbName, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var columns []Column
+	for rows.Next() {
+		var col Column
+		err := rows.Scan(
+			&col.Name,
+			&col.Type,
+			&col.ColumnType,
+			&col.Nullable,
+			&col.Comment,
+		)
+		if err != nil {
+			return nil, err
+		}
+		columns = append(columns, col)
+	}
+
+	return columns, nil
+}
+
+// 新增获取索引信息的方法
+func getIndexes(db *sql.DB, dbName, tableName string) ([]IndexInfo, error) {
+	query := `
+		SELECT 
+			INDEX_NAME,
+			COLUMN_NAME,
+			SEQ_IN_INDEX,
+			IF(NON_UNIQUE = 0, 1, 0) AS IS_UNIQUE,
+			IF(INDEX_NAME = 'PRIMARY', 1, 0) AS IS_PRIMARY,
+			INDEX_TYPE,
+			INDEX_COMMENT
+		FROM information_schema.STATISTICS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+		ORDER BY INDEX_NAME, SEQ_IN_INDEX
+	`
+
+	rows, err := db.Query(query, dbName, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	indexMap := make(map[string]*IndexInfo)
+	for rows.Next() {
+		var (
+			name      string
+			column    string
+			seq       int
+			isUnique  bool
+			isPrimary bool
+			indexType string
+			comment   string
+		)
+
+		err := rows.Scan(
+			&name,
+			&column,
+			&seq,
+			&isUnique,
+			&isPrimary,
+			&indexType,
+			&comment,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if index, exists := indexMap[name]; exists {
+			index.ColumnNames = append(index.ColumnNames, column)
+		} else {
+			indexMap[name] = &IndexInfo{
+				IndexName:    name,
+				ColumnNames:  []string{column},
+				IsUnique:     isUnique,
+				IsPrimary:    isPrimary,
+				IndexType:    indexType,
+				IndexComment: comment,
+			}
+		}
+	}
+
+	var indexes []IndexInfo
+	for _, idx := range indexMap {
+		// 过滤主键（通常已经在字段定义中处理）
+		indexes = append(indexes, *idx)
+
+	}
+
+	return getOrderedColumns(indexes), nil
+}
+
+func formatIndexTag(idx IndexInfo) string {
+	tag := ""
+	switch {
+	case idx.IsPrimary:
+		tag = "pk"
+	case idx.IsUnique:
+		tag = fmt.Sprintf("unique:%s", idx.IndexName)
 	default:
-		return false
+		tag = fmt.Sprintf("index:%s", idx.IndexName)
+	}
+	return tag
+}
+
+func getIndexTypeDescription(idx IndexInfo) string {
+	switch {
+	case idx.IsPrimary:
+		return "PRIMARY KEY"
+	case idx.IsUnique:
+		return "UNIQUE INDEX"
+	default:
+		return fmt.Sprintf("%s INDEX", idx.IndexType)
 	}
 }
 
-func isSlice(typ string) bool {
-	return strings.HasPrefix(typ, "[]")
+func toCamelCase(s string) string {
+	parts := strings.Split(s, "_")
+	for i := range parts {
+		if parts[i] == "" {
+			continue
+		}
+		parts[i] = strings.Title(parts[i])
+	}
+	return strings.Join(parts, "")
 }
 
-func isMap(typ string) bool {
-	return strings.Contains(typ, "map[")
+func mysqlToGoType(col Column) string {
+	nullable := col.Nullable == "YES"
+	isUnsigned := strings.Contains(col.ColumnType, "unsigned")
+
+	switch strings.ToLower(col.Type) {
+	case "tinyint":
+		if isUnsigned {
+			return wrapType("uint8", nullable)
+		}
+		return wrapType("int8", nullable)
+	case "smallint":
+		if isUnsigned {
+			return wrapType("uint16", nullable)
+		}
+		return wrapType("int16", nullable)
+	case "mediumint", "int":
+		if isUnsigned {
+			return wrapType("uint64", nullable)
+		}
+		return wrapType("int64", nullable)
+	case "bigint":
+		if isUnsigned {
+			return wrapType("uint64", nullable)
+		}
+		return wrapType("int64", nullable)
+	case "float":
+		return wrapType("float32", nullable)
+	case "double", "decimal":
+		return wrapType("float64", nullable)
+	case "char", "varchar", "text", "enum", "set":
+		return wrapType("string", nullable)
+	case "json":
+		return wrapType("string", nullable)
+	case "binary", "varbinary", "blob":
+		return wrapType("[]byte", nullable)
+	case "date", "datetime", "timestamp", "time":
+		return wrapType("time.Time", nullable)
+	case "bit":
+		return wrapType("[]byte", nullable)
+	default:
+		return wrapType("interface{}", nullable)
+	}
 }
 
-func isPointer(typ string) bool {
-	return strings.HasPrefix(typ, "*")
+func wrapType(t string, nullable bool) string {
+	if nullable {
+		switch t {
+		case "string":
+			return "sql.NullString"
+		case "int32":
+			return "sql.NullInt32"
+		case "int64":
+			return "sql.NullInt64"
+		case "float64":
+			return "sql.NullFloat64"
+		case "bool":
+			return "sql.NullBool"
+		case "time.Time":
+			return "sql.NullTime"
+		default:
+			return "*" + t
+		}
+	}
+	return t
 }
 
-func hasSpecialTypes(fields []Field) bool {
-	for _, f := range fields {
-		if !isPrimitive(f.Type) && f.Type != "time.Time" {
+// 类型判断函数
+func isPointerType(goType string) bool {
+	// 识别需要深拷贝的类型
+	needDeepCopy := []string{
+		"*",
+		"sql.Null",
+		"datatypes.",
+		"json.RawMessage",
+	}
+	for _, prefix := range needDeepCopy {
+		if strings.HasPrefix(goType, prefix) {
 			return true
 		}
 	}
 	return false
 }
 
-func getPrimaryKey(fields []Field) string {
-	for _, f := range fields {
-		if f.Primary {
-			return f.Name
+// 自动处理复合索引字段排序
+func getOrderedColumns(indexes []IndexInfo) []IndexInfo {
+	sort.Slice(indexes, func(i, j int) bool {
+		if indexes[i].IsPrimary {
+			return true
 		}
-	}
-	return ""
-}
-
-func primaryKeyType(fields []Field) string {
-	for _, f := range fields {
-		if f.Primary {
-			return f.Type
+		if indexes[j].IsPrimary {
+			return false
 		}
-	}
-	return ""
-}
-
-var funcs = template.FuncMap{
-	"hasSpecialTypes": hasSpecialTypes,
-	"isSlice":         isSlice,
-	"isMap":           isMap,
-	"isPointer":       isPointer,
-	"isPrimitive":     isPrimitive,
-	"lower":           strings.ToLower,
-	"getPrimaryKey":   getPrimaryKey,
-	"primaryKeyType":  primaryKeyType,
-}
-
-func GenerateCode(model Model, outputPath string) error {
-	// 创建输出目录
-	if err := os.MkdirAll(outputPath, 0755); err != nil {
-		return err
-	}
-
-	// 生成模型文件
-	modelFile := filepath.Join(outputPath, strings.ToLower(model.Table)+".go")
-	modelTmpl := template.Must(template.New("model").Funcs(funcs).Parse(modelTemplate))
-
-	var modelBuf bytes.Buffer
-	if err := modelTmpl.Execute(&modelBuf, model); err != nil {
-		return err
-	}
-
-	// 格式化代码
-	formatted, err := format.Source(modelBuf.Bytes())
-	if err != nil {
-		return fmt.Errorf("formatting model code: %w", err)
-	}
-
-	if err := os.WriteFile(modelFile, formatted, 0644); err != nil {
-		return err
-	}
-
-	// 生成仓库文件
-	repoTmpl := template.Must(template.New("repo").Funcs(funcs).Parse(memoryRepoTemplate))
-	var repoBuf bytes.Buffer
-	if err := repoTmpl.Execute(&repoBuf, model); err != nil {
-		return err
-	}
-	repoPath := filepath.Join(outputPath, "../repos", model.Table+"_repo.go")
-	formatted, err = format.Source(repoBuf.Bytes())
-	if err != nil {
-		return fmt.Errorf("formatting model code: %w", err)
-	}
-
-	if err := os.WriteFile(repoPath, formatted, 0644); err != nil {
-		return err
-	}
-
-	return nil
+		return indexes[i].IndexName < indexes[j].IndexName
+	})
+	return indexes
 }
