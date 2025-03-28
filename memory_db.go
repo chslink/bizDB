@@ -218,13 +218,24 @@ func (db *MemoryDB) Range(tx *Transaction, tableName string, f func(id, val any)
 		return errors.New("transaction already committed")
 	}
 
+	// 预处理事务中的键
+	processedKeys := make(map[interface{}]struct{})
+	if updates := tx.updates[tableName]; updates != nil {
+		for k := range updates {
+			processedKeys[k] = struct{}{}
+		}
+	}
+	if deletes := tx.deletes[tableName]; deletes != nil {
+		for k := range deletes {
+			processedKeys[k] = struct{}{}
+		}
+	}
+
 	// 处理事务中的更新
 	if updates, ok := tx.updates[tableName]; ok {
 		for k, v := range updates {
-			if deletes, ok := tx.deletes[tableName]; ok {
-				if _, deleted := deletes[k]; deleted {
-					continue
-				}
+			if _, deleted := tx.deletes[tableName]; deleted {
+				continue
 			}
 			if !f(k, v) {
 				return nil
@@ -232,28 +243,20 @@ func (db *MemoryDB) Range(tx *Transaction, tableName string, f func(id, val any)
 		}
 	}
 
-	// 处理基础表中的数据，排除被删除或已更新的
+	// 处理基础表数据
 	tbl, ok := db.tables.Load(tableName)
-	if !ok {
-		return nil
-	}
-	tableObj := tbl.(*Table)
-	tableObj.mu.RLock()
-	defer tableObj.mu.RUnlock()
+	if ok {
+		tableObj := tbl.(*Table)
+		tableObj.mu.RLock()
+		defer tableObj.mu.RUnlock()
 
-	for k, record := range tableObj.data {
-		if deletes, ok := tx.deletes[tableName]; ok {
-			if _, deleted := deletes[k]; deleted {
+		for k, record := range tableObj.data {
+			if _, processed := processedKeys[k]; processed {
 				continue
 			}
-		}
-		if updates, ok := tx.updates[tableName]; ok {
-			if _, updated := updates[k]; updated {
-				continue
+			if !f(k, record.value) {
+				return nil
 			}
-		}
-		if !f(k, record.value) {
-			return nil
 		}
 	}
 

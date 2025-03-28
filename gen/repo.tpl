@@ -86,9 +86,6 @@ func (r *{{$.StructName}}Repo) GetBy{{.FieldName}}(val {{.FieldType}}) (*models.
 
 // Create 创建记录
 func (r *{{.StructName}}Repo) Create(model *models.{{.StructName}}) error {
-	if r.tx == nil {
-		return errors.New("write operation requires a transaction")
-	}
 
 	if existing, _ := r.memDB.Get(r.tx, r.tableName, model.{{.PrimaryKey.Name}}); existing != nil {
 		return fmt.Errorf("record with {{.PrimaryKey.Name}} %v already exists", model.{{.PrimaryKey.Name}})
@@ -99,17 +96,11 @@ func (r *{{.StructName}}Repo) Create(model *models.{{.StructName}}) error {
 
 // Update 更新记录
 func (r *{{.StructName}}Repo) Update(model *models.{{.StructName}}) error {
-	if r.tx == nil {
-		return errors.New("write operation requires a transaction")
-	}
 	return r.memDB.Put(r.tx, r.tableName, model.{{.PrimaryKey.Name}}, model.Copy())
 }
 
 // Delete 删除记录
 func (r *{{.StructName}}Repo) Delete({{.PrimaryKey.Name}} {{.PrimaryKey.GoType}}) error {
-	if r.tx == nil {
-		return errors.New("delete operation requires a transaction")
-	}
 	return r.memDB.Delete(r.tx, r.tableName, {{.PrimaryKey.Name}})
 }
 
@@ -123,38 +114,19 @@ func (r *{{.StructName}}Repo) Range(f func({{.PrimaryKey.Name}} {{.PrimaryKey.Go
 // Query 高级查询
 func (r *{{.StructName}}Repo) Query(q {{.StructName}}Query) ([]*models.{{.StructName}}, error) {
 	var results []*models.{{.StructName}}
-	var end int
 
-	// 分页处理
-	if q.Limit != nil || q.Offset != nil {
-		offset := 0
-		if q.Offset != nil {
-			offset = *q.Offset
-		}
-		limit := 0
-		if q.Limit != nil {
-			limit = *q.Limit
-		}
-		end = offset + limit
-	}
-
+	// 遍历匹配记录
 	err := r.Range(func({{.PrimaryKey.Name}} {{.PrimaryKey.GoType}}, val *models.{{.StructName}}) bool {
 		model := val
-		match := true
 
-		{{range .Fields}}
-		if q.{{.Name}} != nil && *q.{{.Name}} != model.{{.Name}} {
-			match = false
+		// 组合查询条件（模板生成核心修改点）
+		{{if .Fields}}
+		if {{range $index, $field := .Fields}}{{if $index}} || {{end}}(q.{{$field.Name}} != nil && *q.{{$field.Name}} != model.{{$field.Name}}){{end}} {
+			return true // 不匹配则继续
 		}
 		{{end}}
 
-		if match {
-			results = append(results, model.Copy())
-		}
-
-		if end > 0 && len(results) >= end {
-			return false
-		}
+		results = append(results, model.Copy())
 		return true
 	})
 
@@ -162,28 +134,33 @@ func (r *{{.StructName}}Repo) Query(q {{.StructName}}Query) ([]*models.{{.Struct
 		return nil, err
 	}
 
-	// 应用分页
-	if q.Limit != nil || q.Offset != nil {
-		offset := 0
-		if q.Offset != nil {
-			offset = *q.Offset
-		}
-		limit := len(results)
-		if q.Limit != nil {
-			limit = *q.Limit
-		}
-
-		end := offset + limit
-		if end > len(results) {
-			end = len(results)
-		}
-
-		if offset > len(results) {
-			results = []*models.{{.StructName}}{}
-		} else {
-			results = results[offset:end]
-		}
+	// 统一分页处理（模板结构调整）
+	offset := 0
+	if q.Offset != nil {
+		offset = *q.Offset
 	}
+
+	limit := len(results) // 默认全量
+	if q.Limit != nil {
+		limit = *q.Limit
+	}
+
+	// 边界保护（新增模板逻辑）
+	if offset < 0 {
+		offset = 0
+	}
+
+	start := offset
+	if start > len(results) {
+		return []*models.{{.StructName}}{}, nil
+	}
+
+	end := offset + limit
+	if end > len(results) {
+		end = len(results)
+	}
+
+	results = results[start:end]
 
 	return results, nil
 }
